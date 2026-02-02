@@ -155,7 +155,7 @@ def _get_pack_derivative_components(controls, derivative_components):
                 derivatives_out.append(derivatives[count])
                 count += 1
             else:
-                zero_derivative = control._ad_copy()
+                zero_derivative = control._a()
                 zero_derivative *= 0.
                 derivatives_out.append(zero_derivative)
         return derivatives_out
@@ -332,7 +332,8 @@ class ReducedFunctional(AbstractReducedFunctional):
                 else:
                     raise TypeError(
                         f"The control at index {i} must be an `OverloadedType` object "
-                        f"with the same type as the control, which is {control_type}"
+                        f"with the same type as the control, which is {control_type} "
+                        f",but got {type(value)} instead."
                     )
         # Call callback.
         self.eval_cb_pre(self.controls.delist(values))
@@ -379,3 +380,130 @@ class ReducedFunctional(AbstractReducedFunctional):
         finally:
             for control in self.controls:
                 control.unmark_as_control()
+
+class ParametrisedReducedFunctional(ReducedFunctional):
+    """Class representing the reduced functional.
+
+    A reduced functional maps a control value to the provided functional.
+    It may also be used to compute the derivative of the functional with
+    respect to the control.
+
+    Args:
+        functional (:obj:`OverloadedType`): An instance of an OverloadedType,
+            usually :class:`AdjFloat`. This should be the return value of the
+            functional you want to reduce.
+        controls (list[Control]): A list of Control instances, which you want
+            to map to the functional. It is also possible to supply a single
+            Control instance instead of a list.
+        parameters (list): A list of parameters (of type Control), which are updated.
+        derivative_components (tuple of int): The indices of the controls with
+            respect to which to take the derivative. By default, the derivative
+            is taken with respect to all controls. If present, it overwrites
+            derivative_cb_pre and derivative_cb_post.
+        scale (float): A scaling factor applied to the functional and its
+            gradient with respect to the control.
+        tape (Tape): A tape object that the reduced functional will use to
+            evaluate the functional and its gradients (or derivatives).
+        eval_cb_pre (function): Callback function before evaluating the
+            functional. Input is a list of Controls.
+        eval_cb_pos (function): Callback function after evaluating the
+            functional. Inputs are the functional value and a list of Controls.
+        derivative_cb_pre (function): Callback function before evaluating
+            derivatives. Input is a list of Controls.
+            Should return a list of Controls (usually the same
+            list as the input) to be passed to compute_derivative.
+        derivative_cb_post (function): Callback function after evaluating
+            derivatives.  Inputs are: functional.block_variable.checkpoint,
+            list of functional derivatives, list of functional values.
+            Should return a list of derivatives (usually the same
+            list as the input) to be returned from self.derivative.
+        hessian_cb_pre (function): Callback function before evaluating the Hessian.
+            Input is a list of Controls.
+        hessian_cb_post (function): Callback function after evaluating the Hessian.
+            Inputs are the functional, a list of Hessian, and controls.
+        tlm_cb_pre (function): Callback function before evaluating the tangent linear model.
+            Input is a list of Controls.
+        tlm_cb_post (function): Callback function after evaluating the tangent linear model.
+            Inputs are the functional, the tlm result, and controls.
+    """
+
+    def __init__(self, functional, controls, parameters,
+                 scale=1.0, tape=None,
+                 eval_cb_pre=lambda *args: None,
+                 eval_cb_post=lambda *args: None,
+                 derivative_cb_pre=lambda controls: controls,
+                 derivative_cb_post=lambda checkpoint, derivative_components,
+                 controls: derivative_components,
+                 hessian_cb_pre=lambda *args: None,
+                 hessian_cb_post=lambda *args: None,
+                 tlm_cb_pre=lambda *args: None,
+                 tlm_cb_post=lambda *args: None):
+
+
+
+
+        self._parameters = Enlist(Control(parameters))
+        self._new_parameters = Control(parameters)._ad_copy()
+        controls = Enlist(controls)
+        self.n_opt = len(controls) 
+        derivative_components = tuple(range(self.n_opt))
+
+        # Prepare controls + parameters list for base class
+        all_controls = controls + self._parameters
+
+        super().__init__(functional=functional,
+                         controls=all_controls,
+                         derivative_components=derivative_components,
+                         scale=scale,
+                         tape=tape,
+                         eval_cb_pre=eval_cb_pre,
+                         eval_cb_post=eval_cb_post,
+                         derivative_cb_pre=derivative_cb_pre,
+                         derivative_cb_post=derivative_cb_post,
+                         hessian_cb_pre=hessian_cb_pre,
+                         hessian_cb_post=hessian_cb_post,
+                         tlm_cb_pre=tlm_cb_pre,
+                         tlm_cb_post=tlm_cb_post)
+
+
+
+    
+    @property
+    def parameters(self) -> list[Control]:
+        return self._parameters
+    
+    @no_annotations
+    def parameter_update(self, new_parameters):
+        new_parameters = new_parameters
+        if len(Enlist(new_parameters)) != len(self._parameters):
+            raise ValueError(
+                "new_parameters should be a list of same length as parameters."
+            )
+        self._parameters = Enlist(new_parameters)
+
+        # for i, value in enumerate(new_parameters):
+        #     self._parameters[i].update(value.tape_value()) 
+        #     #TODO: Use value instead of tape_value() - the difference is that tape_value stores the value at the point of creation of the node in the computational graph, not the latest
+
+
+        # self._parameters = new_parameters # TODO: Instead of copying, use the assign method of Control class
+
+    @no_annotations
+    def derivative(self, adj_input=1.0, apply_riesz=False):
+        derivatives_full = super().derivative(adj_input=adj_input, apply_riesz=apply_riesz)
+        # Return only derivatives corresponding to optimization controls
+        return Enlist(derivatives_full)[:self.n_opt].delist()
+
+
+    @no_annotations
+    def __call__(self, values):
+        values = Enlist(values)
+        if len(values) != self.n_opt:
+            raise ValueError("Length of values passed to ParametrisedReducedFunctional" \
+            " must match the number of optimization controls.")
+        # concatenate optimization controls + parameters
+        # self._parameters
+        full_values = values + self._parameters
+        return super().__call__(full_values)
+
+
