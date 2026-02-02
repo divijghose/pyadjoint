@@ -442,14 +442,13 @@ class ParametrisedReducedFunctional(ReducedFunctional):
 
 
 
-        self._parameters = Enlist(Control(parameters))
-        self._new_parameters = Control(parameters)._ad_copy()
+        self._parameters = Enlist(parameters)
         controls = Enlist(controls)
         self.n_opt = len(controls) 
         derivative_components = tuple(range(self.n_opt))
 
         # Prepare controls + parameters list for base class
-        all_controls = controls + self._parameters
+        all_controls = controls + Enlist(Control(parameters))
 
         super().__init__(functional=functional,
                          controls=all_controls,
@@ -502,7 +501,7 @@ class ParametrisedReducedFunctional(ReducedFunctional):
             raise ValueError("Length of values passed to ParametrisedReducedFunctional" \
             " must match the number of optimization controls.")
         # concatenate optimization controls + parameters
-        # self._parameters
+        print(self._parameters[0])
         full_values = values + self._parameters
         return super().__call__(full_values)
 
