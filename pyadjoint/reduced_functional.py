@@ -613,11 +613,11 @@ class ParametrisedReducedFunctional(AbstractReducedFunctional):
     @contextmanager
     def marked_controls(self):
         """Return a context manager which marks the active controls."""
-        for control in self.controls:
+        for control in self.all_controls:
             control.mark_as_control()
         try:
             yield
         finally:
-            for control in self.controls:
+            for control in self.all_controls:
                 control.unmark_as_control()
     
