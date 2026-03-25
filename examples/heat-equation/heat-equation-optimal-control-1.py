@@ -1,6 +1,39 @@
 """
-Finite element solver in Firedrake for the time-dependent heat equation, with optimal control of a forcing term.
+Finite element solver in Firedrake for the two-dimensional, time-dependent heat equation, with optimal control of a forcing term.
+The equation solved is
+\partial_t u - k \Delta u = m
+where u is the temperature, k is the diffusivity, and m is a control term. The goal is to find the optimal control m that minimizes the functional
+\int_0^T exp(-lambda*t)*0.5*||u_desired(t) - u(t)||^2 + 0.01*||m||^2 dt
+where u_desired is a time-dependent desired state.
 
+Model predictive control
+The optimization is performed in the context of model predictive control. We divide the time
+interval [0, T] into a number of windows. Consider the first window 
+
+m0      m1     m2      m3     m4
+|--dt--|--dt--|--dt--|--dt--|        W0 
+
+We start with an intial guess for the list of controls [m0, m1, m2, m3, m4] and solve the forward model over the first window W0 to compute the functional. To avoid confusion, going forwards in time in this part is being called time-hopping.
+J = \sum_{i=0}^{t_w0} exp(-lambda*ti)*0.5*||u_desired(ti) - u(ti)||^2 + 0.01*||m||^2 dt. 
+We then assemble a ParametrisedReducedFunctional with J as the functional, 
+[m0, m1, m2, m3, m4] as the controls, and u_init (the initial condition for the window) as the parameter. We then optimize over the controls in [m0, m1, m2, m3, m4] to find an optimal set of controls for that window, [m0_opt, m1_opt, m2_opt, m3_opt, m4_opt].
+
+m0_opt m1_opt m2_opt m3_opt  m4_opt
+|--dt--|--dt--|--dt--|--dt--|        W0
+
+We then perform a time-stepping, using m0_opt as the control for the first time step. We also move the window forward in time,
+henceforth referred to as time-leaping.
+
+         
+|--dt--|--dt--|--dt--|--dt--|        W0
+
+        m1_opt m2_opt m3_opt m4_opt   m5
+--> u1 |--dt--|--dt--|--dt--|--dt--|        W1
+
+The new controls are initialised as the previous optimal controls, and an additional control is initialized as 0 (since the exponential
+term in the funtional means that this contribution will be small anyway). The initial condition for the next window is set to the solution at the end of the current window, and the parametrized reduced functional is updated accordingly. 
+
+In this manner, we hop, step and leap through time.
 """
 import os
 from firedrake import *
