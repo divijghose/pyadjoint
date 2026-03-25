@@ -57,7 +57,9 @@ u_new = Function(V, name="Solution at new time step")
 u_init = Function(V, name="Initial condition")
 u_desired = Function(V, name="Desired state")
 m = Function(V, name="Control")
+m_list = [Function(V, name=f"Control at time step {i}") for i in range(int(T/dt)+1)]
 v = TestFunction(V)
+
 
 x, y = SpatialCoordinate(mesh)
 # Set a Gaussian initial condition
@@ -74,7 +76,8 @@ def du_dt(u_, u, dt):
     return (u_ - u) / dt
 
 # Set up an initial guess for the control
-m.interpolate(Constant(0.0))
+for m_i in m_list:
+    m_i.interpolate(Constant(0.0))
 
 
 
@@ -87,17 +90,19 @@ total_steps = int(round(T / dt))
 window_size = total_steps // num_windows
 remainder_steps = total_steps % num_windows
 
+t_actual = 0.0 # Keeps track of the actual time, only incremented during a time-step.
 # Time-stepping loop to be run in each window
-def window_time_loop(steps_in_window, t, J):
-    for _ in range(steps_in_window):
+def time_hop_loop(steps_in_window, t_init, J):
+    t_current = t_init # Keeps track of the time in a time-hop loop, incremented at each time-hop.
+    for i in range(steps_in_window):
+        m.assign(m_list[i])
         solve(F == 0, u_new, bc)
         u.assign(u_new)
-        t += dt
-
+        t_current += dt
         # Add the "loss" functional
         # \int_0^T exp(-0.1*t)*0.5*||u_desired(t) - u(t)||^2 + 0.01*||m||^2 dt        
-        J += assemble(exp(-0.1*t)*0.5*inner(u_desired_expr(t) - u, u_desired_expr(t) - u)*dx + 0.01*inner(m, m)*dx)
-    
+        J += assemble(exp(-0.1*t_current)*0.5*inner(u_desired_expr(t_current) - u, u_desired_expr(t_current) - u)*dx + 0.01*inner(m, m)*dx)
+
     return J
 
 def set_TAO_solver(Jhat):
@@ -127,7 +132,7 @@ for window in range(num_windows):
     if window == 0:
         u.assign(u_init)
         steps_in_window = window_size + (1 if window < remainder_steps else 0)
-        J = window_time_loop(steps_in_window, t, J)
+        J = time_hop_loop(steps_in_window, t, J)
         Jhat = ParametrisedReducedFunctional(J, Control(m), u_init)
         solver = set_TAO_solver(Jhat)
         m_opt = get_optimal_control(solver)
@@ -135,7 +140,7 @@ for window in range(num_windows):
         u.assign(u_init)
         steps_in_window = window_size + (1 if window < remainder_steps else 0)
     # Time-step forward through the current window, accumulate the "loss" functional
-        J = window_time_loop(steps_in_window, t, J)
+        J = time_hop_loop(steps_in_window, t, J)
         Jhat.update_parameters(u_init)
         m_opt = get_optimal_control(solver)
         m.assign(m_opt)
