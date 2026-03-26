@@ -35,6 +35,7 @@ term in the funtional means that this contribution will be small anyway). The in
 
 In this manner, we hop, step and leap through time.
 """
+
 import os
 from firedrake import *
 import matplotlib.pyplot as plt
@@ -45,20 +46,32 @@ from petsc4py import PETSc
 PETSc.Sys.popErrorHandler()
 continue_annotation()
 
+k = 0.1
+
 num_cells = 50
 mesh = UnitSquareMesh(num_cells, num_cells)
-dt = 0.001
-T = 0.01
-k = 0.1
-V = FunctionSpace(mesh, "CG", 2)
+dt = 0.001 # Time step size
+T = 0.01   # Total time
+window_size = 5 # Number of time-hops in each window
+window_num = 0
+t_actual = 0.0 # Keeps track of the actual time, only incremented during a time-step.
+t_hop = 0.0 # Keeps track of the time in a time-hop loop, incremented at each time-hop.
+# Loop over the time windows
+t_init_window = 0.0
 
+
+outfile = VTKFile("output/heat_equation_optimal_control.pvd")
+
+
+V = FunctionSpace(mesh, "CG", 2)
 u = Function(V, name="State")
 u_new = Function(V, name="Solution at new time step")
 u_init = Function(V, name="Initial condition")
 u_desired = Function(V, name="Desired state")
 m = Function(V, name="Control")
-m_list = [Function(V, name=f"Control at time step {i}") for i in range(int(T/dt)+1)]
+m_list = [Function(V, name=f"Control at time hop {i}") for i in range(window_size)]
 v = TestFunction(V)
+u_point_wise_error = Function(V, name="Pointwise error")
 
 
 x, y = SpatialCoordinate(mesh)
@@ -70,7 +83,7 @@ u.assign(u_init)
 
 # Set a time-dependent desired state
 def u_desired_expr(t):
-    return exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)) * exp(0.1*t)
+    return exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)) * exp(1000.0*t)
 
 def du_dt(u_, u, dt):
     return (u_ - u) / dt
@@ -85,17 +98,12 @@ F = inner(du_dt(u_new, u, dt), v)*dx + k*inner(grad(u_new), grad(v))*dx - inner(
 bc = DirichletBC(V, 0.0, "on_boundary")
 J = 0
 
-num_windows = 10
-total_steps = int(round(T / dt))
-window_size = total_steps // num_windows
-remainder_steps = total_steps % num_windows
 
-t_actual = 0.0 # Keeps track of the actual time, only incremented during a time-step.
 # Time-stepping loop to be run in each window
-def time_hop_loop(steps_in_window, t_init, J):
+def time_hop_loop(controls, t_init, J):
     t_current = t_init # Keeps track of the time in a time-hop loop, incremented at each time-hop.
-    for i in range(steps_in_window):
-        m.assign(m_list[i])
+    for m_i in controls:
+        m.assign(m_i)
         solve(F == 0, u_new, bc)
         u.assign(u_new)
         t_current += dt
@@ -104,6 +112,14 @@ def time_hop_loop(steps_in_window, t_init, J):
         J += assemble(exp(-0.1*t_current)*0.5*inner(u_desired_expr(t_current) - u, u_desired_expr(t_current) - u)*dx + 0.01*inner(m, m)*dx)
 
     return J
+
+def time_step_loop(m_opt, t_init):
+    t_current = t_init
+    m.assign(m_opt)
+    solve(F == 0, u_new, bc)
+    u.assign(u_new)
+    t_current += dt
+    return t_current
 
 def set_TAO_solver(Jhat):
     problem = MinimizationProblem(Jhat)
@@ -121,32 +137,67 @@ def get_optimal_control(solver):
     m_opt = solver.solve()
     return m_opt
 
-# Loop over the time windows
-t = 0.0
-J = 0
-outfile = VTKFile("output/heat_equation_optimal_control.pvd")
 
-for window in range(num_windows):
-    print(f"Optimizing over window {window+1}/{num_windows} with {window_size} time steps")
-    # Set up the functional and optimizer initially
-    if window == 0:
+
+#TODO: Implement the actual time-stepping loop with the correct control for that time-step, and write output at each time step.
+
+
+while t_actual < T:
+    print(f"Starting window {window_num+1} at time {t_actual}")
+    if window_num == 0:
         u.assign(u_init)
-        steps_in_window = window_size + (1 if window < remainder_steps else 0)
-        J = time_hop_loop(steps_in_window, t, J)
-        Jhat = ParametrisedReducedFunctional(J, Control(m), u_init)
+        J = time_hop_loop(m_list, t_actual, J)
+        Jhat = ParametrisedReducedFunctional(J, [Control(m_i) for m_i in m_list], u_init)
         solver = set_TAO_solver(Jhat)
         m_opt = get_optimal_control(solver)
+        t_actual = time_step_loop(m_opt[0], t_actual)
+        u_init.assign(u)
+        window_num += 1
+        m_list[:-1] = m_opt[1:]
+        m_list[-1].interpolate(Constant(0.0))
+        u_desired.interpolate(u_desired_expr(t_actual))
+        u_point_wise_error.interpolate(abs(u_desired - u))
+        outfile.write(u, m, u_desired, u_point_wise_error)
+        Jhat.update_parameters(u_init)
     else:
         u.assign(u_init)
-        steps_in_window = window_size + (1 if window < remainder_steps else 0)
-    # Time-step forward through the current window, accumulate the "loss" functional
-        J = time_hop_loop(steps_in_window, t, J)
-        Jhat.update_parameters(u_init)
+        J = time_hop_loop(m_list, t_actual, J)
         m_opt = get_optimal_control(solver)
-        m.assign(m_opt)
-        u_desired.interpolate(u_desired_expr(t))
-    
-    u_init.assign(u)
-    outfile.write(u, m, u_desired)
+        t_actual = time_step_loop(m_opt[0], t_actual)
+        u_init.assign(u)
+        window_num += 1
+        m_list[:-1] = m_opt[1:]
+        m_list[-1].interpolate(Constant(0.0))
+        u_desired.interpolate(u_desired_expr(t_actual))
+        u_point_wise_error.interpolate(abs(u_desired - u))
+        outfile.write(u, m, u_desired, u_point_wise_error)
+        Jhat.update_parameters(u_init)
 
+
+
+
+
+
+
+# for window in range(num_windows):
+#     steps_in_window = window_size + (1 if window < remainder_steps else 0)
+#     print(f"Optimizing over window {window+1}/{num_windows} with {steps_in_window} time steps")
+
+#     window_controls = m_list[:steps_in_window]
+#     u.assign(u_init)
+#     J = 0
+#     J = time_hop_loop(window_controls, t, J)
+#     Jhat = ParametrisedReducedFunctional(J, [Control(m_i) for m_i in window_controls], u_init)
+#     solver = set_TAO_solver(Jhat)
+#     m_opt = get_optimal_control(solver)
+#     if steps_in_window == 1:
+#         m_opt = [m_opt]
+
+#     for i in range(steps_in_window - 1):
+#         m_list[i].assign(m_opt[i + 1])
+#     m_list[steps_in_window - 1].interpolate(Constant(0.0))
+
+#     t = time_step_loop(m_opt[0], t)
+#     u_init.assign(u)
+#     outfile.write(u, m, u_desired)
 
