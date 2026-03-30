@@ -35,16 +35,20 @@ term in the funtional means that this contribution will be small anyway). The in
 
 In this manner, we hop, step and leap through time.
 """
-
 import os
 from firedrake import *
 import matplotlib.pyplot as plt
 from firedrake.adjoint import *
 from pyadjoint import ParametrisedReducedFunctional
 from pyadjoint.optimization.tao_solver import MinimizationProblem, TAOSolver
-from petsc4py import PETSc
+# from petsc4py import PETSc
+from firedrake.petsc import PETSc
 PETSc.Sys.popErrorHandler()
 continue_annotation()
+
+opts = PETSc.Options()
+
+
 
 k = 0.1
 
@@ -83,7 +87,7 @@ u.assign(u_init)
 
 # Set a time-dependent desired state
 def u_desired_expr(t):
-    return exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)) * exp(1000.0*t)
+    return exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)) * exp(100.0*t)
 
 def du_dt(u_, u, dt):
     return (u_ - u) / dt
@@ -98,6 +102,13 @@ F = inner(du_dt(u_new, u, dt), v)*dx + k*inner(grad(u_new), grad(v))*dx - inner(
 bc = DirichletBC(V, 0.0, "on_boundary")
 J = 0
 
+lambda_t = opts.getReal("--lambda", default=0.1) # Time decay constant
+beta = opts.getReal("--beta", default=0.5) # Regularization parameter for the deviation of the state from the desired state
+gamma = opts.getReal("--gamma", default=0.01) # Regularization parameter for the control
+
+def loss_functional(t_current):
+    return assemble(exp(-lambda_t*t_current)*beta*inner(u_desired_expr(t_current) - u, u_desired_expr(t_current) - u)*dx + gamma*inner(m, m)*dx)
+
 
 # Time-stepping loop to be run in each window
 def time_hop_loop(controls, t_init, J):
@@ -109,7 +120,7 @@ def time_hop_loop(controls, t_init, J):
         t_current += dt
         # Add the "loss" functional
         # \int_0^T exp(-0.1*t)*0.5*||u_desired(t) - u(t)||^2 + 0.01*||m||^2 dt        
-        J += assemble(exp(-0.1*t_current)*0.5*inner(u_desired_expr(t_current) - u, u_desired_expr(t_current) - u)*dx + 0.01*inner(m, m)*dx)
+        J += loss_functional(t_current)
 
     return J
 
@@ -143,7 +154,7 @@ def get_optimal_control(solver):
 
 
 while t_actual < T:
-    print(f"Starting window {window_num+1} at time {t_actual}")
+    PETSc.Sys.Print(f"Starting window {window_num+1} at time {t_actual}")
     if window_num == 0:
         u.assign(u_init)
         J = time_hop_loop(m_list, t_actual, J)
@@ -172,32 +183,3 @@ while t_actual < T:
         u_point_wise_error.interpolate(abs(u_desired - u))
         outfile.write(u, m, u_desired, u_point_wise_error)
         Jhat.update_parameters(u_init)
-
-
-
-
-
-
-
-# for window in range(num_windows):
-#     steps_in_window = window_size + (1 if window < remainder_steps else 0)
-#     print(f"Optimizing over window {window+1}/{num_windows} with {steps_in_window} time steps")
-
-#     window_controls = m_list[:steps_in_window]
-#     u.assign(u_init)
-#     J = 0
-#     J = time_hop_loop(window_controls, t, J)
-#     Jhat = ParametrisedReducedFunctional(J, [Control(m_i) for m_i in window_controls], u_init)
-#     solver = set_TAO_solver(Jhat)
-#     m_opt = get_optimal_control(solver)
-#     if steps_in_window == 1:
-#         m_opt = [m_opt]
-
-#     for i in range(steps_in_window - 1):
-#         m_list[i].assign(m_opt[i + 1])
-#     m_list[steps_in_window - 1].interpolate(Constant(0.0))
-
-#     t = time_step_loop(m_opt[0], t)
-#     u_init.assign(u)
-#     outfile.write(u, m, u_desired)
-
