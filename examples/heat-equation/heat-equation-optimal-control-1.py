@@ -58,6 +58,8 @@ dt = 0.001 # Time step size
 T = 0.01   # Total time
 window_size = 5 # Number of time-hops in each window
 window_num = 0
+window_step = 1
+assert window_step <= window_size, "The window step must be less than or equal to the window size."
 t_actual = 0.0 # Keeps track of the actual time, only incremented during a time-step.
 t_hop = 0.0 # Keeps track of the time in a time-hop loop, incremented at each time-hop.
 # Loop over the time windows
@@ -87,7 +89,7 @@ u.assign(u_init)
 
 # Set a time-dependent desired state
 def u_desired_expr(t):
-    return exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)) * exp(100.0*t)
+    return exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)) * exp(0.1*t)
 
 def du_dt(u_, u, dt):
     return (u_ - u) / dt
@@ -150,8 +152,8 @@ def get_optimal_control(solver):
 
 
 
-#TODO: Implement the actual time-stepping loop with the correct control for that time-step, and write output at each time step.
-
+#TODO: The window-leap could be for greater than one time-step. Implement this.
+#TODO: Write a script to automate the running of this code for different lambda, beta and gammas
 
 while t_actual < T:
     PETSc.Sys.Print(f"Starting window {window_num+1} at time {t_actual}")
@@ -161,25 +163,31 @@ while t_actual < T:
         Jhat = ParametrisedReducedFunctional(J, [Control(m_i) for m_i in m_list], u_init)
         solver = set_TAO_solver(Jhat)
         m_opt = get_optimal_control(solver)
-        t_actual = time_step_loop(m_opt[0], t_actual)
+        for i in range(window_step):
+            t_actual = time_step_loop(m_opt[i], t_actual)
+            u_desired.interpolate(u_desired_expr(t_actual))
+            u_point_wise_error.interpolate(abs(u_desired - u))
+            outfile.write(u, m, u_desired, u_point_wise_error)
         u_init.assign(u)
         window_num += 1
-        m_list[:-1] = m_opt[1:]
-        m_list[-1].interpolate(Constant(0.0))
-        u_desired.interpolate(u_desired_expr(t_actual))
-        u_point_wise_error.interpolate(abs(u_desired - u))
-        outfile.write(u, m, u_desired, u_point_wise_error)
+        m_list[:-window_step] = m_opt[window_step:]
+        for i in range(window_step):
+            m_list[-(i+1)].interpolate(Constant(0.0))
+        
         Jhat.update_parameters(u_init)
     else:
         u.assign(u_init)
         J = time_hop_loop(m_list, t_actual, J)
         m_opt = get_optimal_control(solver)
-        t_actual = time_step_loop(m_opt[0], t_actual)
+        for i in range(window_step):
+            t_actual = time_step_loop(m_opt[i], t_actual)
+            u_desired.interpolate(u_desired_expr(t_actual))
+            u_point_wise_error.interpolate(abs(u_desired - u))
+            outfile.write(u, m, u_desired, u_point_wise_error)
         u_init.assign(u)
         window_num += 1
-        m_list[:-1] = m_opt[1:]
-        m_list[-1].interpolate(Constant(0.0))
-        u_desired.interpolate(u_desired_expr(t_actual))
-        u_point_wise_error.interpolate(abs(u_desired - u))
-        outfile.write(u, m, u_desired, u_point_wise_error)
+        m_list[:-window_step] = m_opt[window_step:]
+        for i in range(window_step):
+            m_list[-(i+1)].interpolate(Constant(0.0))
+
         Jhat.update_parameters(u_init)
