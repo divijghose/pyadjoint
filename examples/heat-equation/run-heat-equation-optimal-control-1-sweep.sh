@@ -6,23 +6,33 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 EXAMPLE_SCRIPT="${SCRIPT_DIR}/heat-equation-optimal-control-1.py"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/sweep-output}"
 MAX_JOBS="${MAX_JOBS:-4}"
+SUMMARY_CSV="${SUMMARY_CSV:-${OUTPUT_ROOT}/all-experiments-final-errors.csv}"
 
 WINDOW_SIZES=(2 3 4 5 6 8 10)
 WINDOW_STEPS=(1 2 3 4 5)
-LAMBDAS=(0.0 0.01 0.05 0.1 0.2 0.5 1.0 2.0)
+LAMBDAS=(0.01 0.05 0.1 0.2 0.5 1.0 2.0)
 BETAS=(0.01 0.05 0.1 0.2 0.5 1.0 2.0 5.0 10.0)
 GAMMAS=(0.0001 0.0005 0.001 0.005 0.01 0.05 0.1 0.5 1.0)
 
 mkdir -p "${OUTPUT_ROOT}"
+rm -f "${SUMMARY_CSV}"
 
 safe_name() {
     printf '%s' "$1" | tr '.-' '__'
 }
 
 wait_for_one_job() {
-    if ! wait -n; then
-        return 1
-    fi
+    local pid
+
+    while true; do
+        for pid in $(jobs -p); do
+            if wait "${pid}"; then
+                return 0
+            fi
+            return 1
+        done
+        sleep 0.1
+    done
 }
 
 active_jobs=0
@@ -48,6 +58,7 @@ for window_size in "${WINDOW_SIZES[@]}"; do
                         --window-size "${window_size}"
                         --window-step "${window_step}"
                         --outfile-path "${outfile_path}"
+                        --summary-csv-path "${SUMMARY_CSV}"
                     )
 
                     mkdir -p "${outfile_path}"

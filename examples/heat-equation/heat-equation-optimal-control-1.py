@@ -35,7 +35,9 @@ term in the funtional means that this contribution will be small anyway). The in
 
 In this manner, we hop, step and leap through time.
 """
+import csv
 import os
+from fcntl import flock, LOCK_EX, LOCK_UN
 from firedrake import *
 import matplotlib.pyplot as plt
 from firedrake.adjoint import *
@@ -56,12 +58,13 @@ k = 0.01
 num_cells = 50
 mesh = UnitSquareMesh(num_cells, num_cells)
 dt = 0.001 # Time step size
-T = 0.05 # Total time
+T = 0.03 # Total time
 window_size = opts.getInt("--window-size", default=5) # Number of time steps in each window
 window_step = opts.getInt("--window-step", default=1) # Number of time steps to step forward in each window. Must be less than or equal to window_size.
 assert window_step <= window_size, "The window step must be less than or equal to the window size."
 
 outfile_path = opts.getString("--outfile-path", default="output")
+summary_csv_path = opts.getString("--summary-csv-path", default="")
 lambda_t = opts.getReal("--lambda", default=0.1) # Time decay constant
 beta = opts.getReal("--beta", default=0.5) # Regularization parameter for the deviation of the state from the desired state
 gamma = opts.getReal("--gamma", default=0.01) # Regularization parameter for the control
@@ -156,6 +159,39 @@ def get_optimal_control(solver):
     m_opt = solver.solve()
     return m_opt
 
+def append_summary_row(summary_path, row):
+    if not summary_path:
+        return
+
+    summary_dir = os.path.dirname(summary_path)
+    if summary_dir:
+        os.makedirs(summary_dir, exist_ok=True)
+
+    fieldnames = [
+        "outfile_path",
+        "window_size",
+        "window_step",
+        "lambda",
+        "beta",
+        "gamma",
+        "final_time",
+        "final_l2_error",
+        "final_linf_error",
+    ]
+
+    with open(summary_path, "a+", newline="") as summary_file:
+        flock(summary_file.fileno(), LOCK_EX)
+        try:
+            summary_file.seek(0, os.SEEK_END)
+            file_is_empty = summary_file.tell() == 0
+            writer = csv.DictWriter(summary_file, fieldnames=fieldnames)
+            if file_is_empty:
+                writer.writeheader()
+            writer.writerow(row)
+            summary_file.flush()
+        finally:
+            flock(summary_file.fileno(), LOCK_UN)
+
 u_desired.interpolate(u_desired_expr(t_actual))
 u_point_wise_error.interpolate(abs(u_desired - u))
 m.assign(m_list[0])
@@ -227,3 +263,20 @@ plt.ylabel("Error")
 plt.title(f"Error over time for window size {window_size}, window step {window_step}, lambda {lambda_t}, beta {beta} and gamma {gamma}")
 plt.legend()
 plt.savefig(f"{outfile_path}/error_plot.png")
+
+final_l2_error = l2_errors[-1] if l2_errors else norm(u_desired - u)
+final_linf_error = linf_errors[-1] if linf_errors else max(u_point_wise_error.dat.data)
+append_summary_row(
+    summary_csv_path,
+    {
+        "outfile_path": outfile_path,
+        "window_size": window_size,
+        "window_step": window_step,
+        "lambda": lambda_t,
+        "beta": beta,
+        "gamma": gamma,
+        "final_time": t_actual,
+        "final_l2_error": final_l2_error,
+        "final_linf_error": final_linf_error,
+    },
+)
