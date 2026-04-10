@@ -45,28 +45,29 @@ from pyadjoint.optimization.tao_solver import MinimizationProblem, TAOSolver
 from firedrake.petsc import PETSc
 PETSc.Sys.popErrorHandler()
 continue_annotation()
+# Set OMP_NUM_THREADS to 1 to avoid warnings
+os.environ["OMP_NUM_THREADS"] = "1"
+
 
 opts = PETSc.Options()
+verbose = opts.getBool("--verbose", default=False)
 
-
-
-k = 0.1
-
+k = 0.01
 num_cells = 50
 mesh = UnitSquareMesh(num_cells, num_cells)
 dt = 0.001 # Time step size
-T = 0.01   # Total time
-window_size = 5 # Number of time-hops in each window
-window_num = 0
-window_step = 1
+T = 0.05 # Total time
+window_size = opts.getInt("--window-size", default=5) # Number of time steps in each window
+window_step = opts.getInt("--window-step", default=1) # Number of time steps to step forward in each window. Must be less than or equal to window_size.
 assert window_step <= window_size, "The window step must be less than or equal to the window size."
-t_actual = 0.0 # Keeps track of the actual time, only incremented during a time-step.
-t_hop = 0.0 # Keeps track of the time in a time-hop loop, incremented at each time-hop.
-# Loop over the time windows
-t_init_window = 0.0
 
-
-outfile = VTKFile("output/heat_equation_optimal_control.pvd")
+outfile_path = opts.getString("--outfile-path", default="output")
+lambda_t = opts.getReal("--lambda", default=0.1) # Time decay constant
+beta = opts.getReal("--beta", default=0.5) # Regularization parameter for the deviation of the state from the desired state
+gamma = opts.getReal("--gamma", default=0.01) # Regularization parameter for the control
+if not os.path.exists(outfile_path):
+    os.makedirs(outfile_path)
+outfile = VTKFile(f"{outfile_path}/heat_equation_optimal_control.pvd")
 
 
 V = FunctionSpace(mesh, "CG", 2)
@@ -81,6 +82,7 @@ u_point_wise_error = Function(V, name="Pointwise error")
 
 
 x, y = SpatialCoordinate(mesh)
+t_actual = 0.0 # Keeps track of the actual time, only incremented during a time-step.
 # Set a Gaussian initial condition
 alpha = 100
 init_expr = exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2))
@@ -96,33 +98,37 @@ def du_dt(u_, u, dt):
 
 # Set up an initial guess for the control
 for m_i in m_list:
-    m_i.interpolate(Constant(0.0))
+    # m_i.interpolate(Constant(0.0))
+    m_i.interpolate(exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
 
 
 
 F = inner(du_dt(u_new, u, dt), v)*dx + k*inner(grad(u_new), grad(v))*dx - inner(m, v)*dx
 bc = DirichletBC(V, 0.0, "on_boundary")
-J = 0
 
-lambda_t = opts.getReal("--lambda", default=0.1) # Time decay constant
-beta = opts.getReal("--beta", default=0.5) # Regularization parameter for the deviation of the state from the desired state
-gamma = opts.getReal("--gamma", default=0.01) # Regularization parameter for the control
 
-def loss_functional(t_current):
-    return assemble(exp(-lambda_t*t_current)*beta*inner(u_desired_expr(t_current) - u, u_desired_expr(t_current) - u)*dx + gamma*inner(m, m)*dx)
 
+#TODO: Why does returning just the loss functional and adding it to loss, then assembling it once not work? It freezes the window loop. 
+def loss_functional(t_current, t_window):
+    u_desired.interpolate(u_desired_expr(t_current))
+    return assemble(((exp(-lambda_t*t_window)*beta*inner(u_desired - u, u_desired - u)) + gamma*inner(m, m))*dx
+)
 
 # Time-stepping loop to be run in each window
 def time_hop_loop(controls, t_init, J):
     t_current = t_init # Keeps track of the time in a time-hop loop, incremented at each time-hop.
+    t_window = 0.0 # Keeps track of the time within the current window. #TODO: Ask if this is the right way to do it, a local time for the window decay
     for m_i in controls:
         m.assign(m_i)
         solve(F == 0, u_new, bc)
         u.assign(u_new)
         t_current += dt
+        t_window += dt
         # Add the "loss" functional
         # \int_0^T exp(-0.1*t)*0.5*||u_desired(t) - u(t)||^2 + 0.01*||m||^2 dt        
-        J += loss_functional(t_current)
+        J+= loss_functional(t_current, t_window)
+    
+
 
     return J
 
@@ -136,7 +142,7 @@ def time_step_loop(m_opt, t_init):
 
 def set_TAO_solver(Jhat):
     problem = MinimizationProblem(Jhat)
-    parameters = { 'method': 'nls',
+    parameters = { 'method': 'lbfgs',
                    'max_it': 20,
                    'fatol' : 0.0,
                    'frtol' : 0.0,
@@ -150,13 +156,21 @@ def get_optimal_control(solver):
     m_opt = solver.solve()
     return m_opt
 
+u_desired.interpolate(u_desired_expr(t_actual))
+u_point_wise_error.interpolate(abs(u_desired - u))
+m.assign(m_list[0])
+outfile.write(u, m, u_desired, u_point_wise_error)
 
+#TODO: Plot the relative l2 error wrt time 
 
-#TODO: The window-leap could be for greater than one time-step. Implement this.
-#TODO: Write a script to automate the running of this code for different lambda, beta and gammas
-
+window_num = 0
+l2_errors = []
+linf_errors = []
+J = 0
+PETSc.Sys.Print(f"Starting experiment with window size {window_size}, window step {window_step}, lambda {lambda_t}, beta {beta} and gamma {gamma}")
 while t_actual < T:
-    PETSc.Sys.Print(f"Starting window {window_num+1} at time {t_actual}")
+    if verbose:
+        PETSc.Sys.Print(f"Starting window {window_num+1} at time {t_actual:.4f}")
     if window_num == 0:
         u.assign(u_init)
         J = time_hop_loop(m_list, t_actual, J)
@@ -168,11 +182,17 @@ while t_actual < T:
             u_desired.interpolate(u_desired_expr(t_actual))
             u_point_wise_error.interpolate(abs(u_desired - u))
             outfile.write(u, m, u_desired, u_point_wise_error)
+            l2_error = norm(u_desired - u)
+            linf_error = max(u_point_wise_error.dat.data)
+            l2_errors.append(l2_error)
+            linf_errors.append(linf_error)
+            if verbose:
+                PETSc.Sys.Print(f"Time {t_actual:.4f}, L2 error: {l2_error:.6f}, L-infinity error: {linf_error:.6f}")
         u_init.assign(u)
         window_num += 1
         m_list[:-window_step] = m_opt[window_step:]
         for i in range(window_step):
-            m_list[-(i+1)].interpolate(Constant(0.0))
+            m_list[-(i+1)].interpolate(exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
         
         Jhat.update_parameters(u_init)
     else:
@@ -184,10 +204,26 @@ while t_actual < T:
             u_desired.interpolate(u_desired_expr(t_actual))
             u_point_wise_error.interpolate(abs(u_desired - u))
             outfile.write(u, m, u_desired, u_point_wise_error)
+            l2_error = norm(u_desired - u)
+            linf_error = max(u_point_wise_error.dat.data)
+            if verbose:
+                PETSc.Sys.Print(f"Time {t_actual:.4f}, L2 error: {l2_error:.6f}, L-infinity error: {linf_error:.6f}")
+            l2_errors.append(l2_error)
+            linf_errors.append(linf_error)
         u_init.assign(u)
         window_num += 1
         m_list[:-window_step] = m_opt[window_step:]
         for i in range(window_step):
-            m_list[-(i+1)].interpolate(Constant(0.0))
+            m_list[-(i+1)].interpolate(exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
 
         Jhat.update_parameters(u_init)
+
+# Plot the relative l2 error over time
+plt.figure()
+plt.plot(np.arange(len(l2_errors))*dt, l2_errors, label="l2 error")
+plt.plot(np.arange(len(linf_errors))*dt, linf_errors, label="L-inf error")
+plt.xlabel("Time")
+plt.ylabel("Error")
+plt.title(f"Error over time for window size {window_size}, window step {window_step}, lambda {lambda_t}, beta {beta} and gamma {gamma}")
+plt.legend()
+plt.savefig(f"{outfile_path}/error_plot.png")
