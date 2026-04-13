@@ -53,6 +53,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 
 opts = PETSc.Options()
 verbose = opts.getBool("--verbose", default=False)
+pvdOutput = opts.getBool("--pvd-output", default=False)
 
 k = 0.01
 num_cells = 50
@@ -195,7 +196,8 @@ def append_summary_row(summary_path, row):
 u_desired.interpolate(u_desired_expr(t_actual))
 u_point_wise_error.interpolate(abs(u_desired - u))
 m.assign(m_list[0])
-outfile.write(u, m, u_desired, u_point_wise_error)
+if pvdOutput:
+    outfile.write(u, m, u_desired, u_point_wise_error)
 
 #TODO: Plot the relative l2 error wrt time 
 
@@ -217,7 +219,8 @@ while t_actual < T:
             t_actual = time_step_loop(m_opt[i], t_actual)
             u_desired.interpolate(u_desired_expr(t_actual))
             u_point_wise_error.interpolate(abs(u_desired - u))
-            outfile.write(u, m, u_desired, u_point_wise_error)
+            if pvdOutput:
+                outfile.write(u, m, u_desired, u_point_wise_error)
             l2_error = norm(u_desired - u)
             linf_error = max(u_point_wise_error.dat.data)
             l2_errors.append(l2_error)
@@ -239,7 +242,8 @@ while t_actual < T:
             t_actual = time_step_loop(m_opt[i], t_actual)
             u_desired.interpolate(u_desired_expr(t_actual))
             u_point_wise_error.interpolate(abs(u_desired - u))
-            outfile.write(u, m, u_desired, u_point_wise_error)
+            if pvdOutput:
+                outfile.write(u, m, u_desired, u_point_wise_error)
             l2_error = norm(u_desired - u)
             linf_error = max(u_point_wise_error.dat.data)
             if verbose:
