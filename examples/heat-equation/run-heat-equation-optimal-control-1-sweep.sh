@@ -51,7 +51,7 @@ for window_size in "${WINDOW_SIZES[@]}"; do
                     outfile_path="${OUTPUT_ROOT}/${run_name}"
 
                     cmd=(
-                        "${PYTHON_BIN}" "${EXAMPLE_SCRIPT}"
+                        mpirun -n 8 "${PYTHON_BIN}" "${EXAMPLE_SCRIPT}"
                         --lambda "${lambda_t}"
                         --beta "${beta}"
                         --gamma "${gamma}"
