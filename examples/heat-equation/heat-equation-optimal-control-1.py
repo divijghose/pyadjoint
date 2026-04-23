@@ -3,7 +3,7 @@ Finite element solver in Firedrake for the two-dimensional, time-dependent heat 
 The equation solved is
 \partial_t u - k \Delta u = m
 where u is the temperature, k is the diffusivity, and m is a control term. The goal is to find the optimal control m that minimizes the functional
-\int_0^T exp(-lambda*t)*0.5*||u_desired(t) - u(t)||^2 + 0.01*||m||^2 dt
+\int_0^T exp(-lambda*t)*weight*||u_desired(t) - u(t)||^2 + ||m||^2 dt
 where u_desired is a time-dependent desired state.
 
 Model predictive control
@@ -14,7 +14,7 @@ m0      m1     m2      m3     m4
 |--dt--|--dt--|--dt--|--dt--|        W0 
 
 We start with an intial guess for the list of controls [m0, m1, m2, m3, m4] and solve the forward model over the first window W0 to compute the functional. To avoid confusion, going forwards in time in this part is being called time-hopping.
-J = \sum_{i=0}^{t_w0} exp(-lambda*ti)*0.5*||u_desired(ti) - u(ti)||^2 + 0.01*||m||^2 dt. 
+J = \sum_{i=0}^{t_w0} exp(-lambda*ti)*misfit_weight*||u_desired(ti) - u(ti)||^2 + ||m||^2 dt. 
 We then assemble a ParametrisedReducedFunctional with J as the functional, 
 [m0, m1, m2, m3, m4] as the controls, and u_init (the initial condition for the window) as the parameter. We then optimize over the controls in [m0, m1, m2, m3, m4] to find an optimal set of controls for that window, [m0_opt, m1_opt, m2_opt, m3_opt, m4_opt].
 
@@ -37,6 +37,8 @@ In this manner, we hop, step and leap through time.
 """
 import csv
 import os
+# Set OMP_NUM_THREADS to 1 to avoid warnings
+os.environ["OMP_NUM_THREADS"] = "1"
 from fcntl import flock, LOCK_EX, LOCK_UN
 from firedrake import *
 import matplotlib.pyplot as plt
@@ -47,31 +49,31 @@ from pyadjoint.optimization.tao_solver import MinimizationProblem, TAOSolver
 from firedrake.petsc import PETSc
 PETSc.Sys.popErrorHandler()
 continue_annotation()
-# Set OMP_NUM_THREADS to 1 to avoid warnings
-os.environ["OMP_NUM_THREADS"] = "1"
 
 
 opts = PETSc.Options()
 verbose = opts.getBool("--verbose", default=False)
-pvdOutput = opts.getBool("--pvd-output", default=False)
+pvdOutput = opts.getBool("--pvd-output", default=True)
 
 k = 0.01
 num_cells = 50
 mesh = UnitSquareMesh(num_cells, num_cells)
 dt = 0.001 # Time step size
-T = 0.03 # Total time
+T = opts.getReal("--final-time", default=0.01) # Final time
 window_size = opts.getInt("--window-size", default=5) # Number of time steps in each window
 window_step = opts.getInt("--window-step", default=1) # Number of time steps to step forward in each window. Must be less than or equal to window_size.
 assert window_step <= window_size, "The window step must be less than or equal to the window size."
 
 outfile_path = opts.getString("--outfile-path", default="output")
 summary_csv_path = opts.getString("--summary-csv-path", default="")
-lambda_t = opts.getReal("--lambda", default=0.1) # Time decay constant
-beta = opts.getReal("--beta", default=0.5) # Regularization parameter for the deviation of the state from the desired state
-gamma = opts.getReal("--gamma", default=0.01) # Regularization parameter for the control
+decay_constant = opts.getReal("--decay-constant", default=0.1) # Time decay constant
+lambda_t = decay_constant/((window_size+window_step)*dt)
+#TODO: Rewrite the time-decay parameter as a function of the window size and the window step
+misfit_weight = opts.getReal("--misfit-weight", default=1.0) # Regularization parameter for the deviation of the state from the desired state
 if not os.path.exists(outfile_path):
-    os.makedirs(outfile_path)
-outfile = VTKFile(f"{outfile_path}/heat_equation_optimal_control.pvd")
+    os.makedirs(outfile_path, exist_ok=True)
+if pvdOutput:
+    outfile = VTKFile(f"{outfile_path}/heat_equation_optimal_control.pvd")
 
 
 V = FunctionSpace(mesh, "CG", 2)
@@ -103,7 +105,7 @@ def du_dt(u_, u, dt):
 # Set up an initial guess for the control
 for m_i in m_list:
     # m_i.interpolate(Constant(0.0))
-    m_i.interpolate(exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
+    m_i.interpolate(0.1*exp(-(alpha*10.0) * ((x - 0.5) ** 2 + (y - 0.5) ** 2))) # A small Gaussian in the middle of the domain as an initial guess for the control.
 
 
 
@@ -115,13 +117,13 @@ bc = DirichletBC(V, 0.0, "on_boundary")
 #TODO: Why does returning just the loss functional and adding it to loss, then assembling it once not work? It freezes the window loop. 
 def loss_functional(t_current, t_window):
     u_desired.interpolate(u_desired_expr(t_current))
-    return assemble(((exp(-lambda_t*t_window)*beta*inner(u_desired - u, u_desired - u)) + gamma*inner(m, m))*dx
+    return assemble(((exp(-lambda_t*t_window)*misfit_weight*inner(u_desired - u, u_desired - u)) + inner(m, m))*dx
 )
 
 # Time-stepping loop to be run in each window
 def time_hop_loop(controls, t_init, J):
     t_current = t_init # Keeps track of the time in a time-hop loop, incremented at each time-hop.
-    t_window = 0.0 # Keeps track of the time within the current window. #TODO: Ask if this is the right way to do it, a local time for the window decay
+    t_window = 0.0 # Keeps track of the time within the current window.
     for m_i in controls:
         m.assign(m_i)
         solve(F == 0, u_new, bc)
@@ -172,9 +174,8 @@ def append_summary_row(summary_path, row):
         "outfile_path",
         "window_size",
         "window_step",
-        "lambda",
-        "beta",
-        "gamma",
+        "decay_constant",
+        "misfit_weight",
         "final_time",
         "final_l2_error",
         "final_linf_error",
@@ -205,7 +206,7 @@ window_num = 0
 l2_errors = []
 linf_errors = []
 J = 0
-PETSc.Sys.Print(f"Starting experiment with window size {window_size}, window step {window_step}, lambda {lambda_t}, beta {beta} and gamma {gamma}")
+PETSc.Sys.Print(f"Starting experiment with window size {window_size}, window step {window_step}, decay constant {decay_constant}, misfit weight {misfit_weight}")
 while t_actual < T:
     if verbose:
         PETSc.Sys.Print(f"Starting window {window_num+1} at time {t_actual:.4f}")
@@ -231,7 +232,7 @@ while t_actual < T:
         window_num += 1
         m_list[:-window_step] = m_opt[window_step:]
         for i in range(window_step):
-            m_list[-(i+1)].interpolate(exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
+            m_list[-(i+1)].interpolate(0.1*exp(-(alpha*10.0) * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
         
         Jhat.update_parameters(u_init)
     else:
@@ -254,7 +255,7 @@ while t_actual < T:
         window_num += 1
         m_list[:-window_step] = m_opt[window_step:]
         for i in range(window_step):
-            m_list[-(i+1)].interpolate(exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
+            m_list[-(i+1)].interpolate(0.1*exp(-(alpha*10.0) * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
 
         Jhat.update_parameters(u_init)
 
@@ -264,7 +265,7 @@ plt.plot(np.arange(len(l2_errors))*dt, l2_errors, label="l2 error")
 plt.plot(np.arange(len(linf_errors))*dt, linf_errors, label="L-inf error")
 plt.xlabel("Time")
 plt.ylabel("Error")
-plt.title(f"Error over time for window size {window_size}, window step {window_step}, lambda {lambda_t}, beta {beta} and gamma {gamma}")
+plt.title(f"Error over time for window size {window_size}, window step {window_step}, \n decay constant {decay_constant}, misfit weight {misfit_weight}")
 plt.legend()
 plt.savefig(f"{outfile_path}/error_plot.png")
 
@@ -276,9 +277,8 @@ append_summary_row(
         "outfile_path": outfile_path,
         "window_size": window_size,
         "window_step": window_step,
-        "lambda": lambda_t,
-        "beta": beta,
-        "gamma": gamma,
+        "decay_constant": decay_constant,
+        "misfit_weight": misfit_weight,
         "final_time": t_actual,
         "final_l2_error": final_l2_error,
         "final_linf_error": final_linf_error,
