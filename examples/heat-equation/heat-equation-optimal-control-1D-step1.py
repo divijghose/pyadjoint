@@ -35,6 +35,7 @@ term in the funtional means that this contribution will be small anyway). The in
 
 In this manner, we hop, step and leap through time.
 """
+from PIL.Image import init
 import csv
 import os
 # Set OMP_NUM_THREADS to 1 to avoid warnings
@@ -48,7 +49,7 @@ from pyadjoint.optimization.tao_solver import MinimizationProblem, TAOSolver
 # from petsc4py import PETSc
 from firedrake.petsc import PETSc
 PETSc.Sys.popErrorHandler()
-continue_annotation()
+# continue_annotation()
 
 
 opts = PETSc.Options()
@@ -57,7 +58,7 @@ pvdOutput = opts.getBool("--pvd-output", default=True)
 
 k = 0.01
 num_cells = 50
-mesh = UnitSquareMesh(num_cells, num_cells)
+mesh = UnitIntervalMesh(num_cells)
 dt = 0.001 # Time step size
 T = opts.getReal("--final-time", default=0.01) # Final time
 window_size = opts.getInt("--window-size", default=5) # Number of time steps in each window
@@ -68,7 +69,6 @@ outfile_path = opts.getString("--outfile-path", default="output")
 summary_csv_path = opts.getString("--summary-csv-path", default="")
 decay_constant = opts.getReal("--decay-constant", default=0.1) # Time decay constant
 lambda_t = decay_constant/((window_size+window_step)*dt)
-#TODO: Rewrite the time-decay parameter as a function of the window size and the window step
 misfit_weight = opts.getReal("--misfit-weight", default=1.0) # Regularization parameter for the deviation of the state from the desired state
 if not os.path.exists(outfile_path):
     os.makedirs(outfile_path, exist_ok=True)
@@ -87,17 +87,17 @@ v = TestFunction(V)
 u_point_wise_error = Function(V, name="Pointwise error")
 
 
-x, y = SpatialCoordinate(mesh)
+x = SpatialCoordinate(mesh)
 t_actual = 0.0 # Keeps track of the actual time, only incremented during a time-step.
 # Set a Gaussian initial condition
 alpha = 100
-init_expr = exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2))
+init_expr = exp(-alpha * ((x[0] - 0.5) ** 2))
 u_init.interpolate(init_expr)
-u.assign(u_init)
+u.interpolate(init_expr)
 
 # Set a time-dependent desired state
 def u_desired_expr(t):
-    return exp(-alpha * ((x - 0.5) ** 2 + (y - 0.5) ** 2)) * exp(0.1*t)
+    return exp(-alpha * ((x[0] - 0.5) ** 2)) * exp(0.1*t)
 
 def du_dt(u_, u, dt):
     return (u_ - u) / dt
@@ -105,7 +105,7 @@ def du_dt(u_, u, dt):
 # Set up an initial guess for the control
 for m_i in m_list:
     # m_i.interpolate(Constant(0.0))
-    m_i.interpolate(0.1*exp(-(alpha*10.0) * ((x - 0.5) ** 2 + (y - 0.5) ** 2))) # A small Gaussian in the middle of the domain as an initial guess for the control.
+    m_i.interpolate(0.1*exp(-(alpha*10.0) * ((x[0] - 0.5) ** 2))) # A small Gaussian in the middle of the domain as an initial guess for the control.
 
 
 
@@ -114,7 +114,6 @@ bc = DirichletBC(V, 0.0, "on_boundary")
 
 
 
-#TODO: Why does returning just the loss functional and adding it to loss, then assembling it once not work? It freezes the window loop. 
 def loss_functional(t_current, t_window):
     u_desired.interpolate(u_desired_expr(t_current))
     return assemble(((exp(-lambda_t*t_window)*misfit_weight*inner(u_desired - u, u_desired - u)) + inner(m, m))*dx
@@ -212,8 +211,13 @@ while t_actual < T:
         PETSc.Sys.Print(f"Starting window {window_num+1} at time {t_actual:.4f}")
     if window_num == 0:
         u.assign(u_init)
+        continue_annotation()
         J = time_hop_loop(m_list, t_actual, J)
         Jhat = ParametrisedReducedFunctional(J, [Control(m_i) for m_i in m_list], u_init)
+        pause_annotation()
+        PETSc.Sys.Print("visualising")
+        tape = get_working_tape()
+        tape.visualise_pdf("tape_visualisation_nonlin.pdf")
         solver = set_TAO_solver(Jhat)
         m_opt = get_optimal_control(solver)
         for i in range(window_step):
@@ -230,9 +234,10 @@ while t_actual < T:
                 PETSc.Sys.Print(f"Time {t_actual:.4f}, L2 error: {l2_error:.6f}, L-infinity error: {linf_error:.6f}")
         u_init.assign(u)
         window_num += 1
-        m_list[:-window_step] = m_opt[window_step:]
         for i in range(window_step):
-            m_list[-(i+1)].interpolate(0.1*exp(-(alpha*10.0) * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
+            m_list[i].assign(m_list[i+window_step])
+        for i in range(window_step):
+            m_list[-(i+1)].interpolate(0.1*exp(-(alpha*10.0) * ((x[0] - 0.5) ** 2)))
         
         Jhat.update_parameters(u_init)
     else:
@@ -253,9 +258,10 @@ while t_actual < T:
             linf_errors.append(linf_error)
         u_init.assign(u)
         window_num += 1
-        m_list[:-window_step] = m_opt[window_step:]
         for i in range(window_step):
-            m_list[-(i+1)].interpolate(0.1*exp(-(alpha*10.0) * ((x - 0.5) ** 2 + (y - 0.5) ** 2)))
+            m_list[i].assign(m_list[i+window_step])
+        for i in range(window_step):
+            m_list[-(i+1)].interpolate(0.1*exp(-(alpha*10.0) * ((x[0] - 0.5) ** 2)))
 
         Jhat.update_parameters(u_init)
 
